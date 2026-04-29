@@ -1,22 +1,32 @@
-name: ذخیره صفحه وب به صورت کامل (Puppeteer)
+name: دانلود کامل وبسایت با wget
 
 on:
   workflow_dispatch:
     inputs:
-      page_url:
-        description: 'آدرس صفحه وب'
+      website_url:
+        description: 'آدرس وبسایت مورد نظر (مثال: https://example.com)'
         required: true
         type: string
       zip_password:
         description: 'رمز عبور برای فایل ZIP'
         required: true
         type: string
+      max_depth:
+        description: 'عمق لینک‌های دنبال شونده (پیشفرض: 5)'
+        required: false
+        default: '5'
+        type: string
+      wait_time:
+        description: 'زمان تاخیر بین درخواست‌ها به ثانیه (پیشفرض: 1)'
+        required: false
+        default: '1'
+        type: string
 
 permissions:
   contents: write
 
 jobs:
-  save-single-page:
+  download-website:
     runs-on: ubuntu-latest
 
     steps:
@@ -26,86 +36,72 @@ jobs:
           fetch-depth: 1
 
       - name: نصب ابزارهای مورد نیاز
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y p7zip-full
-          sudo npm install -g puppeteer
+        run: sudo apt-get update && sudo apt-get install -y p7zip-full wget
 
-      - name: ایجاد اسکریپت ذخیره صفحه
+      - name: دانلود کامل وبسایت
         run: |
-          cat > save_page.js << 'EOF'
-          const puppeteer = require('puppeteer');
-          const fs = require('fs');
-          const path = require('path');
+          # ایجاد پوشه برای ذخیره وبسایت
+          mkdir -p website_download
           
-          async function saveWebPage() {
-            const url = process.argv[2];
-            const outputPath = process.argv[3];
-            
-            console.log(`ذخیره صفحه: ${url}`);
-            
-            // راه‌اندازی مرورگر
-            const browser = await puppeteer.launch({
-              headless: 'new',
-              args: ['--no-sandbox', '--disable-setuid-sandbox']
-            });
-            
-            try {
-              const page = await browser.newPage();
-              
-              // تنظیم viewport
-              await page.setViewport({ width: 1280, height: 800 });
-              
-              // رفتن به آدرس مورد نظر
-              await page.goto(url, {
-                waitUntil: 'networkidle0',
-                timeout: 60000
-              });
-              
-              // دریافت HTML کامل صفحه
-              const html = await page.content();
-              
-              // ذخیره فایل
-              fs.writeFileSync(`${outputPath}.html`, html);
-              console.log(`✅ صفحه ذخیره شد: ${outputPath}.html`);
-              
-              // گرفتن اسکرین‌شات هم بعنوان بکاپ
-              await page.screenshot({ path: `${outputPath}.png`, fullPage: true });
-              console.log(`📸 اسکرین‌شات ذخیره شد: ${outputPath}.png`);
-              
-            } catch (error) {
-              console.error('❌ خطا:', error.message);
-              process.exit(1);
-            } finally {
-              await browser.close();
-            }
-          }
+          # دانلود با wget (میرور کامل سایت)
+          wget \
+            --mirror \
+            --page-requisites \
+            --adjust-extension \
+            --convert-links \
+            --no-parent \
+            --wait=${{ github.event.inputs.wait_time }} \
+            --limit-rate=1000k \
+            --random-wait \
+            --no-clobber \
+            --continue \
+            --directory-prefix=website_download \
+            --level=${{ github.event.inputs.max_depth }} \
+            --accept-regex=".*\.(html|css|js|png|jpg|jpeg|gif|svg|ico|webp|woff|woff2|ttf|eot|xml|json|txt|pdf)$" \
+            --execute robots=off \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            "${{ github.event.inputs.website_url }}"
           
-          saveWebPage();
-          EOF
+          # نمایش آمار دانلود
+          echo "📊 آمار دانلود:"
+          echo "تعداد کل فایل‌ها: $(find website_download -type f | wc -l)"
+          echo "حجم کل: $(du -sh website_download | cut -f1)"
 
-      - name: اجرای اسکریپت و ذخیره صفحه
+      - name: فشرده‌سازی رمزدار وبسایت
         run: |
-          node save_page.js "${{ github.event.inputs.page_url }}" "saved_page"
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=5 -v95m "website_archive.7z" website_download/
 
-      - name: فشرده‌سازی فایل‌های ذخیره شده
-        run: |
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=5 "page_archive.7z" saved_page.html saved_page.png
+      - name: حذف فایل‌های موقت
+        run: rm -rf website_download
 
-      - name: Commit و Push
+      - name: Commit و Push تکه‌ها
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          git add page_archive.7z
-          git commit -m "💾 ذخیره صفحه وب: ${{ github.event.inputs.page_url }}" || echo "تغییری وجود ندارد"
-          
-          for attempt in {1..5}; do
-            if git push; then
-              echo "✅ ارسال با موفقیت انجام شد"
-              break
+          # اضافه کردن تمام فایل‌های آرشیو
+          if ls website_archive.7z* 1> /dev/null 2>&1; then
+            git add website_archive.7z*
+            
+            # بررسی وجود تغییرات
+            if ! git diff --staged --quiet; then
+              git commit -m "Download complete website: ${{ github.event.inputs.website_url }}"
+              
+              # تلاش برای push با retry
+              for attempt in {1..5}; do
+                if git push; then
+                  echo "✅ Push موفقیت‌آمیز بود"
+                  break
+                else
+                  echo "❌ Push failed (attempt $attempt), retrying in 15 seconds..."
+                  sleep 15
+                fi
+              done
             else
-              echo "❌ تلاش $attempt ناموفق، ۱۵ ثانیه صبر می‌کنم..."
-              sleep 15
+              echo "هیچ فایلی برای commit وجود ندارد"
+              exit 1
             fi
-          done
+          else
+            echo "فایل آرشیو پیدا نشد!"
+            exit 1
+          fi
