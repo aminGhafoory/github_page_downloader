@@ -1,0 +1,95 @@
+name: ذخیره صفحه وب به صورت کامل (SingleFile)
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_url:
+        description: 'آدرس صفحه وب'
+        required: true
+        type: string
+      zip_password:
+        description: 'رمز عبور برای فایل ZIP'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  save-single-page:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: دریافت کد مخزن
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: نصب ابزارهای مورد نیاز
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full npm
+          sudo npm install -g puppeteer-cli
+
+      - name: ذخیره صفحه با SingleFile
+        run: |
+          # نصب SingleFile extension via Node.js
+          npm install single-file
+          
+          # ساخت اسکریپت Node.js برای ذخیره صفحه
+          cat > save_page.js << 'EOF'
+          const SingleFile = require('single-file');
+          const path = require('path');
+          
+          async function saveWebPage() {
+            const url = process.argv[2];
+            const outputPath = process.argv[3];
+            
+            console.log(`Saving: ${url}`);
+            
+            const singleFile = new SingleFile(url, {
+              waitUntil: 'networkidle0',
+              timeout: 60000,
+              loadImages: true,
+              loadStylesheets: true,
+              loadScripts: true,
+              removeHiddenElements: false,
+              blockScripts: false
+            });
+            
+            try {
+              const content = await singleFile.getContent();
+              require('fs').writeFileSync(outputPath + '.html', content);
+              console.log(`Saved to: ${outputPath}.html`);
+            } catch (error) {
+              console.error('Error:', error);
+              process.exit(1);
+            }
+          }
+          
+          saveWebPage();
+          EOF
+          
+          # اجرای اسکریپت
+          node save_page.js "${{ github.event.inputs.page_url }}" "saved_page"
+
+      - name: فشرده‌سازی فایل ذخیره شده
+        run: |
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=5 "page_archive.7z" saved_page.html
+
+      - name: Commit و Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git add page_archive.7z
+          git commit -m "💾 Saved webpage: ${{ github.event.inputs.page_url }}"
+          
+          for attempt in {1..5}; do
+            if git push; then
+              echo "✅ Success"
+              break
+            else
+              sleep 15
+            fi
+          done
