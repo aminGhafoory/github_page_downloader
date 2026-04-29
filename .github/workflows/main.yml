@@ -1,10 +1,10 @@
-name: دانلود کامل وبسایت با wget
+name: دانلود کامل وبسایت با HTTrack
 
 on:
   workflow_dispatch:
     inputs:
       website_url:
-        description: 'آدرس وبسایت مورد نظر (مثال: https://example.com)'
+        description: 'آدرس وبسایت مورد نظر'
         required: true
         type: string
       zip_password:
@@ -12,21 +12,21 @@ on:
         required: true
         type: string
       max_depth:
-        description: 'عمق لینک‌های دنبال شونده (پیشفرض: 5)'
+        description: 'حداکثر عمق (پیشفرض: 3)'
         required: false
-        default: '5'
+        default: '3'
         type: string
-      wait_time:
-        description: 'زمان تاخیر بین درخواست‌ها به ثانیه (پیشفرض: 1)'
+      max_mb:
+        description: 'حداکثر حجم دانلود به مگابایت (پیشفرض: 500)'
         required: false
-        default: '1'
+        default: '500'
         type: string
 
 permissions:
   contents: write
 
 jobs:
-  download-website:
+  download-with-httrack:
     runs-on: ubuntu-latest
 
     steps:
@@ -35,73 +35,81 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: نصب ابزارهای مورد نیاز
-        run: sudo apt-get update && sudo apt-get install -y p7zip-full wget
-
-      - name: دانلود کامل وبسایت
+      - name: نصب httrack و ابزارها
         run: |
-          # ایجاد پوشه برای ذخیره وبسایت
-          mkdir -p website_download
+          sudo apt-get update
+          sudo apt-get install -y p7zip-full httrack
+
+      - name: دانلود وبسایت با httrack
+        run: |
+          # ایجاد پوشه پروژه
+          mkdir -p website_mirror
           
-          # دانلود با wget (میرور کامل سایت)
-          wget \
+          # اجرای httrack
+          httrack "${{ github.event.inputs.website_url }}" \
+            -O website_mirror \
+            --depth=${{ github.event.inputs.max_depth }} \
+            --max-rate=1000000 \
+            --max-size=$(( ${{ github.event.inputs.max_mb }} * 1000000 )) \
+            --stay-on-same-domain \
+            --can-go-up-and-down \
+            --robots=0 \
+            --verbose \
             --mirror \
-            --page-requisites \
-            --adjust-extension \
-            --convert-links \
-            --no-parent \
-            --wait=${{ github.event.inputs.wait_time }} \
-            --limit-rate=1000k \
-            --random-wait \
-            --no-clobber \
-            --continue \
-            --directory-prefix=website_download \
-            --level=${{ github.event.inputs.max_depth }} \
-            --accept-regex=".*\.(html|css|js|png|jpg|jpeg|gif|svg|ico|webp|woff|woff2|ttf|eot|xml|json|txt|pdf)$" \
-            --execute robots=off \
-            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            "${{ github.event.inputs.website_url }}"
+            --retries=3 \
+            --timeout=30 \
+            --user-agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
           
-          # نمایش آمار دانلود
-          echo "📊 آمار دانلود:"
-          echo "تعداد کل فایل‌ها: $(find website_download -type f | wc -l)"
-          echo "حجم کل: $(du -sh website_download | cut -f1)"
+          # نمایش اطلاعات دانلود
+          echo "📊 آمار دانلود httrack:"
+          echo "محل ذخیره: website_mirror/${{ github.event.inputs.website_url }}/"
+          
+          # پیدا کردن پوشه اصلی (httrack یک پوشه با نام دامنه میسازه)
+          MAIN_DIR=$(find website_mirror -type d -name "*$(echo ${{ github.event.inputs.website_url }} | sed 's/https\?:\/\///' | sed 's/\/.*//')*" | head -1)
+          
+          if [ -d "$MAIN_DIR" ]; then
+            echo "تعداد کل فایل‌ها: $(find "$MAIN_DIR" -type f | wc -l)"
+            echo "حجم کل: $(du -sh "$MAIN_DIR" | cut -f1)"
+          fi
 
-      - name: فشرده‌سازی رمزدار وبسایت
+      - name: فشرده‌سازی وبسایت دانلود شده
         run: |
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=5 -v95m "website_archive.7z" website_download/
+          # پیدا کردن پوشه اصلی
+          MAIN_DIR=$(find website_mirror -type d -name "*$(echo ${{ github.event.inputs.website_url }} | sed 's/https\?:\/\///' | sed 's/\/.*//')*" | head -1)
+          
+          if [ -z "$MAIN_DIR" ]; then
+            # اگر پوشه خاص پیدا نشد، کل محتوا رو فشرده کن
+            MAIN_DIR="website_mirror"
+          fi
+          
+          echo "فشرده‌سازی: $MAIN_DIR"
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=5 -v95m "website_archive.7z" "$MAIN_DIR"
 
-      - name: حذف فایل‌های موقت
-        run: rm -rf website_download
+      - name: پاکسازی
+        run: rm -rf website_mirror
 
       - name: Commit و Push تکه‌ها
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # اضافه کردن تمام فایل‌های آرشیو
-          if ls website_archive.7z* 1> /dev/null 2>&1; then
-            git add website_archive.7z*
-            
-            # بررسی وجود تغییرات
-            if ! git diff --staged --quiet; then
-              git commit -m "Download complete website: ${{ github.event.inputs.website_url }}"
-              
-              # تلاش برای push با retry
-              for attempt in {1..5}; do
-                if git push; then
-                  echo "✅ Push موفقیت‌آمیز بود"
-                  break
-                else
-                  echo "❌ Push failed (attempt $attempt), retrying in 15 seconds..."
-                  sleep 15
-                fi
-              done
-            else
-              echo "هیچ فایلی برای commit وجود ندارد"
-              exit 1
-            fi
-          else
-            echo "فایل آرشیو پیدا نشد!"
+          # اضافه کردن آرشیوها
+          git add website_archive.7z* 2>/dev/null || true
+          
+          if git diff --staged --quiet; then
+            echo "⚠️ هیچ فایلی برای commit وجود ندارد"
             exit 1
           fi
+          
+          git commit -m "🌐 Mirror website: ${{ github.event.inputs.website_url }}"
+          
+          # Push با retry
+          for attempt in {1..5}; do
+            if git push; then
+              echo "✅ Push موفقیت‌آمیز بود"
+              break
+            else
+              echo "❌ Attempt $attempt failed, retrying in 15 seconds..."
+              sleep 15
+            fi
+          done
