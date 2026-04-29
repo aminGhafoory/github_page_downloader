@@ -1,4 +1,4 @@
-name: ذخیره صفحه وب به صورت کامل (SingleFile)
+name: ذخیره صفحه وب به صورت کامل (Puppeteer)
 
 on:
   workflow_dispatch:
@@ -28,54 +28,69 @@ jobs:
       - name: نصب ابزارهای مورد نیاز
         run: |
           sudo apt-get update
-          sudo apt-get install -y p7zip-full npm
-          sudo npm install -g puppeteer-cli
+          sudo apt-get install -y p7zip-full
+          sudo npm install -g puppeteer
 
-      - name: ذخیره صفحه با SingleFile
+      - name: ایجاد اسکریپت ذخیره صفحه
         run: |
-          # نصب SingleFile extension via Node.js
-          npm install single-file
-          
-          # ساخت اسکریپت Node.js برای ذخیره صفحه
           cat > save_page.js << 'EOF'
-          const SingleFile = require('single-file');
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
           const path = require('path');
           
           async function saveWebPage() {
             const url = process.argv[2];
             const outputPath = process.argv[3];
             
-            console.log(`Saving: ${url}`);
+            console.log(`ذخیره صفحه: ${url}`);
             
-            const singleFile = new SingleFile(url, {
-              waitUntil: 'networkidle0',
-              timeout: 60000,
-              loadImages: true,
-              loadStylesheets: true,
-              loadScripts: true,
-              removeHiddenElements: false,
-              blockScripts: false
+            // راه‌اندازی مرورگر
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
             });
             
             try {
-              const content = await singleFile.getContent();
-              require('fs').writeFileSync(outputPath + '.html', content);
-              console.log(`Saved to: ${outputPath}.html`);
+              const page = await browser.newPage();
+              
+              // تنظیم viewport
+              await page.setViewport({ width: 1280, height: 800 });
+              
+              // رفتن به آدرس مورد نظر
+              await page.goto(url, {
+                waitUntil: 'networkidle0',
+                timeout: 60000
+              });
+              
+              // دریافت HTML کامل صفحه
+              const html = await page.content();
+              
+              // ذخیره فایل
+              fs.writeFileSync(`${outputPath}.html`, html);
+              console.log(`✅ صفحه ذخیره شد: ${outputPath}.html`);
+              
+              // گرفتن اسکرین‌شات هم بعنوان بکاپ
+              await page.screenshot({ path: `${outputPath}.png`, fullPage: true });
+              console.log(`📸 اسکرین‌شات ذخیره شد: ${outputPath}.png`);
+              
             } catch (error) {
-              console.error('Error:', error);
+              console.error('❌ خطا:', error.message);
               process.exit(1);
+            } finally {
+              await browser.close();
             }
           }
           
           saveWebPage();
           EOF
-          
-          # اجرای اسکریپت
+
+      - name: اجرای اسکریپت و ذخیره صفحه
+        run: |
           node save_page.js "${{ github.event.inputs.page_url }}" "saved_page"
 
-      - name: فشرده‌سازی فایل ذخیره شده
+      - name: فشرده‌سازی فایل‌های ذخیره شده
         run: |
-          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=5 "page_archive.7z" saved_page.html
+          7z a -p"${{ github.event.inputs.zip_password }}" -mhe=on -mx=5 "page_archive.7z" saved_page.html saved_page.png
 
       - name: Commit و Push
         run: |
@@ -83,13 +98,14 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
           git add page_archive.7z
-          git commit -m "💾 Saved webpage: ${{ github.event.inputs.page_url }}"
+          git commit -m "💾 ذخیره صفحه وب: ${{ github.event.inputs.page_url }}" || echo "تغییری وجود ندارد"
           
           for attempt in {1..5}; do
             if git push; then
-              echo "✅ Success"
+              echo "✅ ارسال با موفقیت انجام شد"
               break
             else
+              echo "❌ تلاش $attempt ناموفق، ۱۵ ثانیه صبر می‌کنم..."
               sleep 15
             fi
           done
